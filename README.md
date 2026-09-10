@@ -32,4 +32,4 @@ The tool bootstraps a target using `nxc smb` to identify the hostname, domain, O
 ## Usage
 
 ```bash
-python3 main.py <target-ip>
+python3 main.py -t <target-ip>
