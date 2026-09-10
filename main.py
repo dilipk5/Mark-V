@@ -46,8 +46,8 @@ class App:
         self.target = target_ip       # this is the IP we connect to
         self.domain = None            # discovered via bootstrap
         self.hostname = None
-        self.username = None
-        self.password = None
+        self.username = 'henry'
+        self.password = 'H3nry_987TGV!'
         self.smb_signing = None
         self.scroll_offset = 0
         self.lock = threading.Lock()
@@ -69,6 +69,45 @@ def run_cmd(cmd: list[str], timeout: int = 60) -> tuple[str, str, int]:
         return "", "TIMEOUT", -1
     except FileNotFoundError:
         return "", f"COMMAND NOT FOUND: {cmd[0]}", -1
+
+def run_cmd_streaming(app: "App", cmd: list[str], timeout: int = 120) -> tuple[str, str, int]:
+    """
+    Same contract as run_cmd (returns full stdout/stderr/returncode at the
+    end), but pushes each output line into the passive log feed AS IT
+    ARRIVES rather than waiting for the whole process to exit. Use this
+    for anything slow — --users-export, --rid-brute, kerberoasting,
+    bloodhound collection — where you want visible progress instead of
+    the UI looking frozen for a minute or two. Keep using plain run_cmd
+    for fast checks (single auth attempts, host fingerprinting) where a
+    one-line summary is all you need.
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # merge stderr into stdout so errors aren't missed
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        msg = f"COMMAND NOT FOUND: {cmd[0]}"
+        app.danger(msg)
+        return "", msg, -1
+
+    lines = []
+    try:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line:
+                lines.append(line)
+                app.info(line)
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        app.danger(f"Command timed out after {timeout}s: {' '.join(cmd)}")
+        return "\n".join(lines), "TIMEOUT", -1
+
+    return "\n".join(lines), "", proc.returncode
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +155,7 @@ def task_bootstrap(app: App, target: str, domain: str = ""):
     app.info("Bootstrap complete. Domain/hostname set — try 'smbnull' next.")
 
 
-def task_smb_null_session_enum(app: App, target: str, domain: str = ""):
+def task_smb_null_session_enum(app: App, target: str, domain: str = "" ,username: str="", password: str=""):
     """Step 1: Null session / anonymous SMB enumeration + share listing."""
     app.info(f"Starting SMB null-session enumeration against {target}")
 
@@ -160,9 +199,77 @@ def task_smb_null_session_enum(app: App, target: str, domain: str = ""):
 
     app.info("SMB null-session enumeration complete")
 
+def user_enum_with_creds(app: App, target: str, domain: str = "", username: str="", password: str=""):
+    app.info("Quick Creds Check")
+    stdout, stderr, rc = run_cmd(["nxc", "smb", target, "-u", username, "-p", password])
+
+    auth_ok = "[+]" in stdout
+    if auth_ok:
+        app.warn("Authentication successful, listing users and saving in users file")
+    else:
+        app.warn(f"Authentication failed for '{username}'") 
+        return
+
+    app.info("Enumerating Users and saving it in users file")
+
+    stdout, stderr, rc = run_cmd_streaming(
+        app,                                                   
+        ["nxc", "smb", target, "-u", username, "-p", password, "--users-export", "users"],
+    )
+
+    app.info("All users saved in users file")
+    try:                                                        
+        with open("users", "r", encoding="utf-8") as file:
+            content = file.read()
+        app.info(content)
+    except FileNotFoundError:
+        app.danger("'users' file not found — export may have failed")
+
+    return 0
+
+def get_data_bloodhound_nxc(app: App, target: str, domain: str = "", username: str="", password: str=""):
+    app.info("Collection Data for Bloodhound using nxc")
+
+    stdout, stderr, rc = run_cmd(["nxc", "smb", target, "-u", username, "-p", password])
+
+    auth_ok = "[+]" in stdout
+
+    if auth_ok:
+        app.warn("Authentication successful, Executing nxc ldap")
+    else:
+        app.warn(f"Authentication failed for '{username}'")
+        return
+
+    
+    stdout, stderr, rc = run_cmd_streaming(app,["nxc", "ldap", target, "-u", username, "-p", password,"--bloodhound","-c","all","--dns-server",target])
+    app.warn("Collection Successfull, Happy Graphing !")
+
+
+def get_data_bloodhound_rusthound(app: App, target: str, domain: str = "", username: str="", password: str=""):
+    app.info("Collecting Data for Bloodhound using nxc")
+
+    stdout, stderr, rc = run_cmd(["nxc", "smb", target, "-u", username, "-p", password])
+
+    auth_ok = "[+]" in stdout
+
+    if auth_ok:
+        app.warn("Authentication successful, Executing rusthound-ce")
+    else:
+        app.warn(f"Authentication failed for '{username}'")
+        return
+
+    stdout, stderr, rc = run_cmd_streaming(app,["rusthound-ce", "-d", domain, "-u", username, "-p", password,"-i",target,"-c","All","-o","./rusthound","-z"])
+    app.warn("Data saved in ./rusthound folder, Happy Graphing !")
+    return
+
+def spec_users_pass():
+    return
 
 TASKS = {
     "smbnull": task_smb_null_session_enum,
+    "getusers":user_enum_with_creds,
+    "rusthound":get_data_bloodhound_rusthound,
+    "nxcbloodhound":get_data_bloodhound_nxc
     # future: "ridcycle": task_rid_cycle, "shares": task_share_content, ...
 }
 
@@ -238,10 +345,16 @@ def dispatch_command(app: App, cmd: str):
         setattr(app, parts[1], parts[2])
         app.info(f"Set {parts[1]} = {parts[2]}")
         return
+    
+    if verb == "help" or verb=="list" or verb=="ls":
+        app.info("All available functions")
+        for i in TASKS:
+            app.danger(i)
+        return
 
     if verb in TASKS:
         fn = TASKS[verb]
-        t = threading.Thread(target=fn, args=(app, app.target, app.domain or ""), daemon=True)
+        t = threading.Thread(target=fn, args=(app, app.target, app.domain or "",app.username,app.password), daemon=True)
         t.start()
         return
 
