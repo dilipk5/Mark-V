@@ -1,5 +1,7 @@
 # AD Pentest Assistant
 
+NOTE: STILL IN PROGRESS
+
 A lightweight Python-based Active Directory penetration testing assistant designed to automate common enumeration tasks.
 
 The tool bootstraps a target using `nxc smb` to identify the hostname, domain, OS, and SMB signing status, then provides simple modules for SMB enumeration, credential checks, user enumeration, and BloodHound data collection.
